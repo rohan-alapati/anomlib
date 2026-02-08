@@ -10,3 +10,5 @@ out/
 .ipynb_checkpoints/
 .pytest_cache/
 .mypy_cache/
+anaconda_projects/
+*.egg-info/
