@@ -3,5 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 data/
+out/
 *.csv
+*.parquet
 *.zip
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/

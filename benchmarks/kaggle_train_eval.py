@@ -277,7 +277,10 @@ def main():
     if USE_GENERIC_DETECTOR:
         events, scores = det.detect(test_df)
     else:
-        events, scores = detect_with_router(det, generic_det, test_df, generic_buildings)
+        if isinstance(det, EnergyTimeSeriesDetector):
+            events, scores = detect_with_router(det, generic_det, test_df, generic_buildings)
+        else:
+            raise TypeError("det must be an instance of EnergyTimeSeriesDetector to use detect_with_router.")
     print("threshold_quantile:", THRESHOLD_QUANTILE)
     print("threshold_cap:", THRESHOLD_CAP)
     print("threshold_end_ratio:", THRESHOLD_END_RATIO)
