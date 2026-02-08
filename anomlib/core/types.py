@@ -14,7 +14,7 @@ class Event:
     entity_id: str | int
     start: pd.Timestamp
     end: pd.Timestamp
-    direction: Literal["low", "high"]
+    direction: Literal["low", "high", "both"]
     severity: float
     score_peak: float
     score_mean: float
