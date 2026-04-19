@@ -1,4 +1,4 @@
-# anomlib (WIP)
+# anomlib
 
 `anomlib` is a Python library for anomaly event detection in time-series data.
 
@@ -6,6 +6,11 @@ It follows a consistent pipeline:
 1. baseline
 2. robust score
 3. event merge
+
+For labeled energy datasets such as LEAD/Kaggle, the repo also includes a supervised path:
+1. leakage-safe feature build
+2. row-level anomaly probability
+3. hysteresis event merge
 
 ## Design split: core vs detectors
 
@@ -48,6 +53,19 @@ This detector uses only generic baseline behavior from core:
 - generic defaults (`direction="both"`, no persistence required by default)
 
 Use this when you want a reusable starting point without domain assumptions.
+
+#### `EnergySupervisedDetector` (labeled energy preset)
+
+This detector uses supervised learning for datasets that include an `anomaly` label:
+
+- normalizes to the internal schema, then aligns labels on `(entity_id, timestamp)`
+- builds leakage-safe lag and rolling features using only past data
+- adds a train-only seasonal expectation and residual features
+- trains a row-level classifier (LightGBM when available)
+- converts probabilities into events with hysteresis eventing
+- tunes event parameters on a validation split instead of tuning on test
+
+Use this when you have labeled building-meter anomalies and want stronger precision/recall than the unsupervised baseline can usually provide.
 
 ### Opinionated modules
 
@@ -99,20 +117,60 @@ det.fit(df_history)
 events, scored = det.detect(df_new)
 ```
 
-## What changed in this refactor
+### Supervised energy preset
 
-- moved opinionated baseline logic out of `anomlib/core`
-- added `anomlib/opinionated/energy_baseline.py` for energy assumptions
-- replaced core baseline with domain-agnostic `EntityRobustBaseline`
-- added `GenericTimeSeriesDetector`
-- kept `EnergyTimeSeriesDetector` as explicit opinionated preset
- - added auto-routing support in `benchmarks/kaggle_train_eval.py`
+```python
+from anomlib.detectors import EnergySupervisedDetector
+
+det = EnergySupervisedDetector(
+    entity_col="building_id",
+    time_col="timestamp",
+    value_col="meter_reading",
+    direction="high",
+    threshold_strategy="evented_f1_grid",
+    use_hysteresis=True,
+    min_duration="3h",
+    gap_tolerance="3h",
+)
+
+det.fit(train_df, val_df=val_df)   # requires train_df["anomaly"]
+events, scored = det.detect(test_df)
+```
+
+## Current structure
+
+- opinionated baseline logic lives outside `anomlib/core`
+- `anomlib/opinionated/energy_baseline.py` holds energy-specific assumptions
+- `EntityRobustBaseline` remains the domain-agnostic core baseline
+- `GenericTimeSeriesDetector` provides a reusable non-domain preset
+- `EnergyTimeSeriesDetector` remains the explicit unsupervised energy preset
+- `EnergySupervisedDetector` adds a labeled energy path with probability scoring and event tuning
+- `benchmarks/kaggle_train_eval.py` supports both supervised evaluation and unsupervised routing
 
 This keeps core reusable while making modeling assumptions explicit at detector level.
 
-## Benchmark routing (kaggle_train_eval)
+## Benchmarking (kaggle_train_eval)
 
-`benchmarks/kaggle_train_eval.py` supports auto-routing between detectors:
+`benchmarks/kaggle_train_eval.py` supports two main flows:
+
+- unsupervised routing flow:
+  uses `EnergyTimeSeriesDetector` and optional routing to `GenericTimeSeriesDetector`
+- supervised flow:
+  uses `EnergySupervisedDetector` with a per-entity time-based `train/val/test` split
+
+In supervised mode the benchmark:
+
+- splits each building into contiguous train/val/test blocks
+- fits the classifier on train only
+- tunes hysteresis event parameters on val only
+- reports point-level and event-level metrics on test only
+- writes:
+  - `out/kaggle_events_with_overlap.csv`
+  - `out/kaggle_scores.parquet`
+
+This makes the benchmark useful both for model iteration and for understanding the operational tradeoff between precision, recall, and event quality.
+
+The unsupervised benchmark path still supports auto-routing between detectors:
 
 - set `AUTO_ROUTE_GENERIC = True` to route worst baseline-mismatch buildings
 - control how many via `AUTO_ROUTE_TOP_K`
