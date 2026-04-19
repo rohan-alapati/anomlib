@@ -15,7 +15,7 @@ from anomlib.detectors import EnergyTimeSeriesDetector, GenericTimeSeriesDetecto
 from anomlib.core.schema import normalize_timeseries_df
 
 
-DATA_PATH = "data/kaggle/train.csv"
+DATA_PATH = "data/kaggle/art_daily_jumpsup.csv"
 OUT_DIR = "out"
 
 # Detector knobs
@@ -178,7 +178,12 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # 1) Load
-    df = load_train(DATA_PATH)
+    df = pd.read_csv(DATA_PATH)
+    df = df.rename(columns={"value": "meter_reading"})
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["building_id"] = 0  # single-series dataset
+    df = df.sort_values(["building_id", "timestamp"]).reset_index(drop=True)
+
     df = df.copy()
 
     # Ensure timestamp dtype
