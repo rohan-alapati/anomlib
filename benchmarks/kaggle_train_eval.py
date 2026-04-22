@@ -518,19 +518,19 @@ def main():
         print("label_frac median:", evt_df["label_frac"].median())
         print("label_frac > 0.5:", (evt_df["label_frac"] > 0.5).mean())
 
-        # evt_path = os.path.join(OUT_DIR, "kaggle_events_with_overlap.csv")
-        # evt_df.to_csv(evt_path, index=False)
-        # print("\nwrote:", evt_path)
+        evt_path = os.path.join(OUT_DIR, "kaggle_events_with_overlap.csv")
+        evt_df.to_csv(evt_path, index=False)
+        print("\nwrote:", evt_path)
     else:
         print("\nSkipping event-level overlap table (no labels or no events).")
 
-    # # 7) Save test scores
-    # score_path = os.path.join(OUT_DIR, "kaggle_scores.parquet")
-    # save_cols = ["building_id", "timestamp", "meter_reading", "pred", "score"]
-    # if "anomaly" in df_eval.columns:
-    #     save_cols.insert(3, "anomaly")
-    # df_eval[save_cols].to_parquet(score_path, index=False)
-    # print("wrote:", score_path)
+    # 7) Save test scores
+    score_path = os.path.join(OUT_DIR, "kaggle_scores.parquet")
+    save_cols = ["building_id", "timestamp", "meter_reading", "pred", "score"]
+    if "anomaly" in df_eval.columns:
+        save_cols.insert(3, "anomaly")
+    df_eval[save_cols].to_parquet(score_path, index=False)
+    print("wrote:", score_path)
 
 
 if __name__ == "__main__":
