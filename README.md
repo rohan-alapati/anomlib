@@ -137,6 +137,40 @@ det.fit(train_df, val_df=val_df)   # requires train_df["anomaly"]
 events, scored = det.detect(test_df)
 ```
 
+### Cornell EMCS electricity preset
+
+```python
+from anomlib.datasets import load_cornell_emcs_csv
+from anomlib.detectors import CornellEMCSElectricityDetector
+
+df = load_cornell_emcs_csv("Electric-data.csv")
+
+det = CornellEMCSElectricityDetector()
+det.fit(df.iloc[:500])
+events, scored = det.detect(df.iloc[500:])
+```
+
+Cornell EMCS exports are expected to contain a timestamp column such as `Time`
+plus one or more meter columns such as `AliceCookHouse.Elec.PowerScout18/kWsystem`.
+The loader converts wide exports into the internal schema:
+
+- `entity_id`: original meter/building column name
+- `timestamp`: parsed EMCS timestamp
+- `value`: safely coerced numeric meter reading
+
+The Cornell detector looks for sustained significant deviations from baseline,
+not isolated point spikes. It learns a robust calendar baseline from historical
+data, scores later observations with signed residual severity, and merges
+consecutive threshold crossings into event-level anomalies. For hourly data it
+uses `day-of-week x hour`; for daily data it uses `month x day-of-week` with
+fallbacks when history is sparse.
+
+Recommended EMCS workflow:
+
+- use the Cornell demo in rolling mode for walk-forward evaluation
+- use fixed thresholds by default (`threshold_quantile=None`)
+- treat full-history `all` mode as inspection, not honest evaluation
+
 ## Current structure
 
 - opinionated baseline logic lives outside `anomlib/core`

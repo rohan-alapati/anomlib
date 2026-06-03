@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 import pandas as pd
 
 Direction = Literal["low", "high", "both"]
@@ -19,3 +19,9 @@ class Event:
     score_peak: float
     score_mean: float
     reason: str
+    duration: pd.Timedelta | None = None
+    max_abs_score: float | None = None
+    mean_abs_score: float | None = None
+    observed_mean: float | None = None
+    expected_mean: float | None = None
+    residual_mean: float | None = None

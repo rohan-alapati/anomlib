@@ -102,6 +102,7 @@ class EnergyTimeSeriesDetector:
             min_duration=self.min_duration,
             threshold_end_ratio=self.threshold_end_ratio,
             gap_tolerance=self.gap_tolerance,
+            assume_sorted=True,
         )
 
         return events, d[["entity_id", "timestamp", "value", "score"]]

@@ -1,4 +1,4 @@
-from .cornell_emcs import (
+from .load import (
     infer_cornell_emcs_meter_columns,
     infer_cornell_emcs_time_column,
     infer_timeseries_cadence,

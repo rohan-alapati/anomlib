@@ -7,7 +7,6 @@ import pandas as pd
 
 from anomlib.core.eventing import (
     events_to_point_labels,
-    scores_to_events,
     scores_to_events_hysteresis,
 )
 from anomlib.core.schema import normalize_timeseries_df
@@ -42,15 +41,11 @@ class EnergySupervisedDetector:
         value_col: str = "meter_reading",
         direction: str = "both",
         threshold: float = 0.9,
-        threshold_strategy: str = "recall_target",
-        recall_target: float = 0.65,
-        threshold_grid: np.ndarray | None = None,
-        use_hysteresis: bool = True,
+        threshold_strategy: str = "evented_f1_grid",
         start_threshold: float | None = None,
         continue_threshold: float = 0.85,
         min_duration: str | pd.Timedelta = "3h",
         gap_tolerance: str | pd.Timedelta = "3h",
-        threshold_end_ratio: float = 0.75,
         explain_events: bool = True,
         feature_windows: tuple[int, ...] = (24, 168),
         lags: tuple[int, ...] = (1, 24, 168),
@@ -63,18 +58,11 @@ class EnergySupervisedDetector:
         self.direction = direction
         self.threshold = float(threshold)
         self.threshold_strategy = str(threshold_strategy)
-        self.recall_target = float(recall_target)
-        self.threshold_grid = (
-            np.linspace(0.5, 0.995, 100)
-            if threshold_grid is None
-            else np.asarray(threshold_grid, dtype=float)
-        )
-        self.use_hysteresis = bool(use_hysteresis)
+        self.use_hysteresis = True
         self.start_threshold = float(start_threshold) if start_threshold is not None else None
         self.continue_threshold = float(continue_threshold)
         self.min_duration = _to_timedelta(min_duration)
         self.gap_tolerance = _to_timedelta(gap_tolerance)
-        self.threshold_end_ratio = float(threshold_end_ratio)
         self.explain_events = bool(explain_events)
         self.feature_windows = tuple(int(w) for w in feature_windows)
         self.lags = tuple(int(k) for k in lags)
@@ -93,13 +81,11 @@ class EnergySupervisedDetector:
         self._seasonal_profile = pd.DataFrame(
             columns=["entity_id", "dow", "hour", "seasonal_expected"]
         )
+        self._seasonal_profile_map = pd.Series(dtype=float)
         self._entity_median = pd.Series(dtype=float)
         self._global_median = 0.0
 
     def fit(self, df_train: pd.DataFrame, val_df: pd.DataFrame | None = None):
-        if self.threshold_strategy.lower() == "evented_f1_grid":
-            self.use_hysteresis = True
-
         d_train, y_train = self._normalize_with_labels(df_train)
         if len(d_train) == 0:
             raise ValueError("Training dataframe has no valid rows after normalization.")
@@ -128,37 +114,7 @@ class EnergySupervisedDetector:
             x_val = self._make_features(d_val, fit_mode=False)
             y_val_arr = y_val.to_numpy()
             val_prob = self._predict_prob(calib_model, x_val)
-            if self.threshold_strategy.lower() == "evented_f1_grid":
-                self._tune_event_params_on_val(d_val, val_prob, y_val_arr)
-            else:
-                self._threshold = self._select_threshold(val_prob, y_val_arr)
-                self._start_threshold = (
-                    float(self.start_threshold) if self.start_threshold is not None else float(self._threshold)
-                )
-                self._continue_threshold = float(min(self.continue_threshold, self._start_threshold))
-
-                raw_m = self._point_metrics((val_prob >= self._threshold).astype(int), y_val_arr)
-                val_events = self._events_from_scores(d_val, val_prob, float(self._threshold))
-                event_pred = events_to_point_labels(
-                    d_val[["entity_id", "timestamp"]],
-                    val_events,
-                    entity_col="entity_id",
-                    time_col="timestamp",
-                ).astype(int)
-                event_m = self._point_metrics(event_pred, y_val_arr)
-                print(
-                    "val calibration metrics "
-                    f"(raw@{self._threshold:.3f}): p={raw_m['precision']:.3f} r={raw_m['recall']:.3f} f1={raw_m['f1']:.3f}"
-                )
-                print(
-                    "val calibration metrics "
-                    f"(evented@{self._threshold:.3f}): p={event_m['precision']:.3f} r={event_m['recall']:.3f} f1={event_m['f1']:.3f}"
-                )
-                if self.use_hysteresis:
-                    print(
-                        f"val hysteresis thresholds: start={self._start_threshold:.3f} "
-                        f"continue={self._continue_threshold:.3f}"
-                    )
+            self._tune_event_params_on_val(d_val, val_prob, y_val_arr)
         else:
             self._threshold = self.threshold
             self._start_threshold = (
@@ -189,28 +145,17 @@ class EnergySupervisedDetector:
     def _events_from_scores(self, d: pd.DataFrame, prob: np.ndarray, threshold: float):
         tmp = d[["entity_id", "timestamp"]].copy()
         tmp["score"] = prob
-        if self.use_hysteresis:
-            return scores_to_events_hysteresis(
-                df=tmp,
-                score_col="score",
-                entity_col="entity_id",
-                time_col="timestamp",
-                direction="high",
-                start_threshold=float(self._start_threshold),
-                continue_threshold=float(self._continue_threshold),
-                min_duration=self.min_duration,
-                gap_tolerance=self.gap_tolerance,
-            )
-        return scores_to_events(
+        return scores_to_events_hysteresis(
             df=tmp,
             score_col="score",
             entity_col="entity_id",
             time_col="timestamp",
             direction="high",
-            threshold=float(threshold),
+            start_threshold=float(self._start_threshold),
+            continue_threshold=float(self._continue_threshold),
             min_duration=self.min_duration,
-            threshold_end_ratio=self.threshold_end_ratio,
             gap_tolerance=self.gap_tolerance,
+            assume_sorted=True,
         )
 
     def _tune_event_params_on_val(
@@ -221,12 +166,13 @@ class EnergySupervisedDetector:
     ) -> None:
         val_base = d_val[["entity_id", "timestamp"]].copy()
         val_base["score"] = val_prob
+        val_points = d_val[["entity_id", "timestamp"]]
 
         starts = [0.60, 0.70, 0.80, 0.90]
         deltas = [0.10, 0.15, 0.20]
         min_ds = ["2h", "3h", "6h"]
         gaps = ["1h", "3h"]
-        candidates: list[dict[str, float | int | str]] = []
+        best: dict[str, float | int | str] | None = None
 
         for start in starts:
             for delta in deltas:
@@ -243,38 +189,40 @@ class EnergySupervisedDetector:
                             continue_threshold=float(cont),
                             min_duration=_to_timedelta(min_d),
                             gap_tolerance=_to_timedelta(gap),
+                            assume_sorted=True,
                         )
                         pred = events_to_point_labels(
-                            d_val[["entity_id", "timestamp"]],
+                            val_points,
                             events,
                             entity_col="entity_id",
                             time_col="timestamp",
+                            assume_sorted=True,
                         ).astype(int)
                         m = self._point_metrics(pred, y_val)
-                        candidates.append(
-                            {
-                                "start": float(start),
-                                "continue": float(cont),
-                                "min_duration": str(min_d),
-                                "gap_tolerance": str(gap),
-                                "precision": float(m["precision"]),
-                                "recall": float(m["recall"]),
-                                "f1": float(m["f1"]),
-                                "n_events": int(len(events)),
-                            }
-                        )
+                        candidate = {
+                            "start": float(start),
+                            "continue": float(cont),
+                            "min_duration": str(min_d),
+                            "gap_tolerance": str(gap),
+                            "precision": float(m["precision"]),
+                            "recall": float(m["recall"]),
+                            "f1": float(m["f1"]),
+                            "n_events": int(len(events)),
+                        }
+                        if self._is_better_event_candidate(candidate, best):
+                            best = candidate
 
-        eligible = [c for c in candidates if float(c["precision"]) >= 0.50]
-        pool = eligible if eligible else candidates
-        best = max(
-            pool,
-            key=lambda c: (
-                float(c["f1"]),
-                float(c["precision"]),
-                -int(c["n_events"]),
-                float(c["start"]),
-            ),
-        )
+        if best is None:
+            best = {
+                "start": float(self.threshold),
+                "continue": float(min(self.continue_threshold, self.threshold)),
+                "min_duration": str(self.min_duration),
+                "gap_tolerance": str(self.gap_tolerance),
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "n_events": 0,
+            }
 
         self._start_threshold = float(best["start"])
         self._continue_threshold = float(best["continue"])
@@ -299,6 +247,33 @@ class EnergySupervisedDetector:
         f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
         return {"precision": precision, "recall": recall, "f1": f1}
 
+    def _is_better_event_candidate(
+        self,
+        candidate: dict[str, float | int | str],
+        incumbent: dict[str, float | int | str] | None,
+    ) -> bool:
+        if incumbent is None:
+            return True
+
+        cand_eligible = float(candidate["precision"]) >= 0.50
+        inc_eligible = float(incumbent["precision"]) >= 0.50
+        if cand_eligible != inc_eligible:
+            return cand_eligible
+
+        cand_key = (
+            float(candidate["f1"]),
+            float(candidate["precision"]),
+            -int(candidate["n_events"]),
+            float(candidate["start"]),
+        )
+        inc_key = (
+            float(incumbent["f1"]),
+            float(incumbent["precision"]),
+            -int(incumbent["n_events"]),
+            float(incumbent["start"]),
+        )
+        return cand_key > inc_key
+
     def _normalize_with_labels(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
         if self.label_col not in df.columns:
             raise ValueError(f"Supervised detector requires '{self.label_col}' in fit dataframe.")
@@ -318,14 +293,14 @@ class EnergySupervisedDetector:
         return merged[["entity_id", "timestamp", "value"]], merged[self.label_col]
 
     def _expected_for_rows(self, d: pd.DataFrame) -> pd.Series:
-        keys = d[["entity_id"]].copy()
-        keys["dow"] = d["timestamp"].dt.dayofweek.astype(int)
-        keys["hour"] = d["timestamp"].dt.hour.astype(int)
-        exp = keys.merge(
-            self._seasonal_profile,
-            on=["entity_id", "dow", "hour"],
-            how="left",
-        )["seasonal_expected"]
+        keys = pd.MultiIndex.from_arrays(
+            [
+                d["entity_id"].to_numpy(),
+                d["timestamp"].dt.dayofweek.astype(int).to_numpy(),
+                d["timestamp"].dt.hour.astype(int).to_numpy(),
+            ]
+        )
+        exp = pd.Series(keys.map(self._seasonal_profile_map), index=d.index, dtype=float)
         exp = exp.fillna(d["entity_id"].map(self._entity_median))
         exp = exp.fillna(self._global_median)
         return pd.to_numeric(exp, errors="coerce").fillna(self._global_median).astype(float)
@@ -338,7 +313,7 @@ class EnergySupervisedDetector:
         time_ns_by_entity: dict[object, np.ndarray] = {}
         for ent, g in d2.groupby("entity_id", sort=False):
             idx = g.index.to_numpy()
-            t_ns = pd.to_datetime(g["timestamp"]).astype("int64").to_numpy()
+            t_ns = pd.to_datetime(g["timestamp"]).to_numpy(dtype="datetime64[ns]").astype("int64")
             idx_by_entity[ent] = idx
             idx_by_entity[str(ent)] = idx
             time_ns_by_entity[ent] = t_ns
@@ -399,13 +374,10 @@ class EnergySupervisedDetector:
             top3 = ranked[:3]
             top_s = ", ".join([f"{f}={v:.3g}" for _, f, v in top3]) if top3 else "n/a"
 
-            if self.use_hysteresis:
-                thresh_s = (
-                    f"thr_start={self._start_threshold:.3f},"
-                    f"thr_cont={self._continue_threshold:.3f}"
-                )
-            else:
-                thresh_s = f"thr={self._threshold:.3f}"
+            thresh_s = (
+                f"thr_start={self._start_threshold:.3f},"
+                f"thr_cont={self._continue_threshold:.3f}"
+            )
 
             reason = (
                 f"prob_peak={prob_peak:.3f} ({thresh_s}); "
@@ -451,6 +423,11 @@ class EnergySupervisedDetector:
             .reset_index()
         )
         self._seasonal_profile = prof
+        self._seasonal_profile_map = (
+            prof.set_index(["entity_id", "dow", "hour"])["seasonal_expected"]
+            if len(prof) > 0
+            else pd.Series(dtype=float)
+        )
         self._entity_median = tmp.groupby("entity_id", observed=True)["value"].median()
         self._global_median = float(tmp["value"].median()) if len(tmp) else 0.0
 
@@ -478,16 +455,14 @@ class EnergySupervisedDetector:
             x[f"roll_std_{w}"] = rg.std().reset_index(level=0, drop=True)
             x[f"roll_median_{w}"] = rg.median().reset_index(level=0, drop=True)
 
-        keys = x[["entity_id", "dow", "hour"]].copy()
-        keys["dow"] = keys["dow"].astype(int)
-        keys["hour"] = keys["hour"].astype(int)
-        x = x.join(
-            keys.merge(
-                self._seasonal_profile,
-                on=["entity_id", "dow", "hour"],
-                how="left",
-            )["seasonal_expected"]
+        seasonal_keys = pd.MultiIndex.from_arrays(
+            [
+                x["entity_id"].to_numpy(),
+                x["dow"].astype(int).to_numpy(),
+                x["hour"].astype(int).to_numpy(),
+            ]
         )
+        x["seasonal_expected"] = seasonal_keys.map(self._seasonal_profile_map).astype(float)
         x["seasonal_expected"] = x["seasonal_expected"].fillna(x["entity_id"].map(self._entity_median))
         x["seasonal_expected"] = x["seasonal_expected"].fillna(self._global_median)
         x["resid"] = x["value"] - x["seasonal_expected"]
@@ -574,34 +549,3 @@ class EnergySupervisedDetector:
         if p.ndim != 2 or p.shape[1] < 2:
             raise ValueError("Model predict_proba returned unexpected shape.")
         return p[:, 1].astype(float)
-
-    def _select_threshold(self, val_prob: np.ndarray, y_val: np.ndarray) -> float:
-        grid = np.asarray(self.threshold_grid, dtype=float)
-        strategy = self.threshold_strategy.lower()
-
-        if strategy == "recall_target":
-            feasible = []
-            best_gap = float("inf")
-            best_gap_thr = float(self.threshold)
-            for thr in grid:
-                pred = (val_prob >= thr).astype(int)
-                m = self._point_metrics(pred, y_val)
-                if m["recall"] >= self.recall_target:
-                    feasible.append(float(thr))
-                gap = abs(self.recall_target - m["recall"])
-                if gap < best_gap:
-                    best_gap = gap
-                    best_gap_thr = float(thr)
-            if feasible:
-                return max(feasible)
-            return best_gap_thr
-
-        best_thr = float(self.threshold)
-        best_f1 = -1.0
-        for thr in grid:
-            pred = (val_prob >= thr).astype(int)
-            m = self._point_metrics(pred, y_val)
-            if m["f1"] > best_f1 or (m["f1"] == best_f1 and thr > best_thr):
-                best_f1 = m["f1"]
-                best_thr = float(thr)
-        return best_thr

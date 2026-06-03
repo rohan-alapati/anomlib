@@ -12,6 +12,7 @@ def scores_to_events(
     min_duration: pd.Timedelta,
     threshold_end_ratio: float = 1.0,
     gap_tolerance: pd.Timedelta = pd.Timedelta(0),
+    assume_sorted: bool = False,
 ) -> list[Event]:
     """
     Convert pointwise scores into merged anomaly events.
@@ -22,7 +23,9 @@ def scores_to_events(
     start on threshold, continue while above threshold*ratio.
     """
     out: list[Event] = []
-    df = df[[entity_col, time_col, score_col]].dropna().sort_values([entity_col, time_col])
+    df = df[[entity_col, time_col, score_col]].dropna()
+    if not assume_sorted:
+        df = df.sort_values([entity_col, time_col])
 
     def is_flag(s: float, thr: float) -> bool:
         if direction == "both":
@@ -117,6 +120,7 @@ def scores_to_events_hysteresis(
     continue_threshold: float,
     min_duration: pd.Timedelta,
     gap_tolerance: pd.Timedelta = pd.Timedelta(0),
+    assume_sorted: bool = False,
 ) -> list[Event]:
     """
     Convert pointwise scores to events using explicit hysteresis thresholds.
@@ -127,7 +131,9 @@ def scores_to_events_hysteresis(
         raise ValueError("scores_to_events_hysteresis currently supports direction='high' only.")
 
     out: list[Event] = []
-    d = df[[entity_col, time_col, score_col]].dropna().sort_values([entity_col, time_col])
+    d = df[[entity_col, time_col, score_col]].dropna()
+    if not assume_sorted:
+        d = d.sort_values([entity_col, time_col])
     thr_start = float(start_threshold)
     thr_continue = float(min(continue_threshold, start_threshold))
 
@@ -195,6 +201,7 @@ def events_to_point_labels(
     events,
     entity_col: str = "entity_id",
     time_col: str = "timestamp",
+    assume_sorted: bool = False,
 ) -> np.ndarray:
     """
     Convert event intervals into pointwise boolean labels aligned to df rows.
@@ -220,7 +227,7 @@ def events_to_point_labels(
             continue
 
         intervals = sorted(intervals, key=lambda x: x[0])
-        gg = g.sort_values(time_col)
+        gg = g if assume_sorted else g.sort_values(time_col)
         t = pd.to_datetime(gg[time_col]).to_numpy()
         pos = gg["__pos"].to_numpy()
         m = np.zeros(len(gg), dtype=bool)
